@@ -41,6 +41,10 @@ type Ingestor struct {
 	counter atomic.Uint64
 }
 
+func (i *Ingestor) SetFileSizeLimit(limit int64) {
+	i.MaxSegmentLength = limit
+}
+
 func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) (*Ingestor, error) {
 	i := &Ingestor{
 		NumOfShard:       numOfShards,

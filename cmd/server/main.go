@@ -15,6 +15,7 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	stream, err := mini_stream.NewIngestor(2, "./data", logger)
+	stream.SetFileSizeLimit(1024 * 1024 * 1024) // todo: improve get this by config
 	if err != nil {
 		log.Fatalf("failed to create ingestor: %v", err)
 	}
