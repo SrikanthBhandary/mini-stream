@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -42,6 +41,9 @@ type Ingestor struct {
 	DataDir          string
 	logger           *slog.Logger
 	shards           map[int]*Shard
+	// to improve the read performance. Since os.Open is costly
+	fdCache map[string]*os.File
+	cacheMu sync.RWMutex
 }
 
 func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) *Ingestor {
@@ -52,6 +54,7 @@ func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) *Ingestor
 		MaxRecords:       1000,
 		shards:           make(map[int]*Shard),
 		MaxSegmentLength: 1024, // 1 kb for now
+		fdCache:          make(map[string]*os.File),
 	}
 
 	for s := 0; s < numOfShards; s++ {
@@ -99,10 +102,11 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 	if shard.CurrentOffset+int64(len(data))+4 > i.MaxSegmentLength {
 		i.logger.Info("Rotating the current active segment file", "shard", shard, "file", shard.ActiveFile.Name())
 
-		err := shard.ActiveFile.Close()
-		if err != nil {
-			return seqNum, err
-		}
+		// During rotation, hand the old file to the read cache
+		oldName := shard.ActiveFile.Name()
+		i.cacheMu.Lock()
+		i.fdCache[oldName] = shard.ActiveFile // keep it open, readable
+		i.cacheMu.Unlock()
 
 		newActiveFileName := filepath.Join(i.DataDir, fmt.Sprintf("shard-%d", shardID), fmt.Sprintf("%d.log", time.Now().Unix()))
 		f, err := os.OpenFile(newActiveFileName, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
@@ -111,6 +115,7 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 		}
 		shard.CurrentOffset = 0
 		shard.ActiveFile = f
+		byteOffset = 0
 
 	}
 
@@ -142,36 +147,29 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 func (i *Ingestor) Read(shardID int, seqNum uint64) (string, error) {
 	shard := i.shards[shardID]
 	shard.mu.RLock()
-	defer shard.mu.RUnlock()
-
 	record, exists := shard.OffsetIndex[seqNum]
+	shard.mu.RUnlock()
+
 	if !exists {
 		return "", fmt.Errorf("sequence number not found")
 	}
 
-	// FIX: Open the file stored in the RecordLocation, NOT the active one
-	f, err := os.OpenFile(record.Filename, os.O_RDONLY, 0644)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	// 1. Seek to the position
-	_, err = f.Seek(int64(record.Offset), 0)
+	// Use our new helper instead of os.OpenFile
+	f, err := i.getFile(record.Filename)
 	if err != nil {
 		return "", err
 	}
 
 	// 2. Read the 4-byte header to know how much to read
 	header := make([]byte, 4)
-	if _, err := io.ReadFull(f, header); err != nil {
+	if _, err := f.ReadAt(header, int64(record.Offset)); err != nil {
 		return "", err
 	}
 	dataLen := binary.BigEndian.Uint32(header)
 
 	// 3. Read the actual JSON payload
 	payload := make([]byte, dataLen)
-	if _, err := io.ReadFull(f, payload); err != nil {
+	if _, err := f.ReadAt(payload, int64(record.Offset)+4); err != nil {
 		return "", err
 	}
 
@@ -194,6 +192,33 @@ func (i *Ingestor) getShard(key string) int {
 	return int(hashSum % uint32(i.NumOfShard))
 }
 
+func (i *Ingestor) getFile(path string) (*os.File, error) {
+	i.cacheMu.RLock()
+	f, ok := i.fdCache[path]
+	i.cacheMu.RUnlock()
+	if ok {
+		return f, nil
+	}
+
+	// Cache miss: Lock for writing
+	i.cacheMu.Lock()
+	defer i.cacheMu.Unlock()
+
+	// Double-check check (in case another thread opened it while we waited for lock)
+	if f, ok := i.fdCache[path]; ok {
+		return f, nil
+	}
+
+	// Open the file
+	newF, err := os.OpenFile(path, os.O_RDONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	i.fdCache[path] = newF
+	return newF, nil
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	stream := NewIngestor(2, "./data", logger)
@@ -213,7 +238,7 @@ func main() {
 	// CONSUMER
 	g.Go(func() error {
 		var next uint64
-		for next < 5 {
+		for next < 10 {
 			val, err := stream.Read(0, next)
 			if err != nil {
 				time.Sleep(200 * time.Millisecond)
