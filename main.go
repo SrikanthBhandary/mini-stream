@@ -299,6 +299,18 @@ func (i *Ingestor) recoverShard(shard *Shard) error {
 
 }
 
+func (i *Ingestor) Close() {
+	i.cacheMu.Lock()
+	defer i.cacheMu.Unlock()
+	for _, f := range i.fdCache {
+		f.Close()
+	}
+
+	for _, v := range i.shards {
+		v.ActiveFile.Close()
+	}
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	stream, err := NewIngestor(2, "./data", logger)
