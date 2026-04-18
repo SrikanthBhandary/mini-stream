@@ -8,14 +8,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 )
-
-var counter atomic.Uint64
 
 // RecordLocation is the sequence information
 type RecordLocation struct {
@@ -44,9 +43,10 @@ type Ingestor struct {
 	// to improve the read performance. Since os.Open is costly
 	fdCache map[string]*os.File
 	cacheMu sync.RWMutex
+	counter atomic.Uint64
 }
 
-func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) *Ingestor {
+func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) (*Ingestor, error) {
 	i := &Ingestor{
 		NumOfShard:       numOfShards,
 		DataDir:          dataDir,
@@ -61,20 +61,29 @@ func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) *Ingestor
 		shardPath := filepath.Join(dataDir, fmt.Sprintf("shard-%d", s))
 		os.MkdirAll(shardPath, 0755)
 
-		filename := filepath.Join(shardPath, fmt.Sprintf("%d.log", time.Now().Unix()))
-		f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
-		if err != nil {
-			panic(err)
-		}
-		i.shards[s] = &Shard{
+		shard := &Shard{
 			ID:          s,
 			Path:        shardPath,
-			ActiveFile:  f,
 			OffsetIndex: make(map[uint64]RecordLocation),
-			NextSeqNum:  0,
 		}
+
+		if err := i.recoverShard(shard); err != nil {
+			return nil, err // propagate instead of panic
+		}
+
+		// If no existing files found, create a fresh active file
+		if shard.ActiveFile == nil {
+			filename := filepath.Join(shardPath, fmt.Sprintf("%d.log", time.Now().Unix()))
+			f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
+			if err != nil {
+				return nil, err
+			}
+			shard.ActiveFile = f
+		}
+
+		i.shards[s] = shard
 	}
-	return i
+	return i, nil
 }
 
 func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
@@ -93,13 +102,17 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 	byteOffset := shard.CurrentOffset
 
 	// 2. Prepare Header: [4 bytes for data length]
-	header := make([]byte, 4)
+	header := make([]byte, 8)
+
+	checksum := crc32.ChecksumIEEE(data)
+
 	binary.BigEndian.PutUint32(header, uint32(len(data)))
+	binary.BigEndian.PutUint32(header[4:8], checksum)
 
 	// Check for the size and if it crosses the segmentation length
 	// rotate the file and set the active file name.
 
-	if shard.CurrentOffset+int64(len(data))+4 > i.MaxSegmentLength {
+	if shard.CurrentOffset+int64(len(data))+8 > i.MaxSegmentLength {
 		i.logger.Info("Rotating the current active segment file", "shard", shard, "file", shard.ActiveFile.Name())
 
 		// During rotation, hand the old file to the read cache
@@ -111,7 +124,7 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 		newActiveFileName := filepath.Join(i.DataDir, fmt.Sprintf("shard-%d", shardID), fmt.Sprintf("%d.log", time.Now().Unix()))
 		f, err := os.OpenFile(newActiveFileName, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 		if err != nil {
-			panic(err)
+			return seqNum, err
 		}
 		shard.CurrentOffset = 0
 		shard.ActiveFile = f
@@ -160,17 +173,22 @@ func (i *Ingestor) Read(shardID int, seqNum uint64) (string, error) {
 		return "", err
 	}
 
-	// 2. Read the 4-byte header to know how much to read
-	header := make([]byte, 4)
+	// 2. Read the 8-byte header to know how much to read
+	header := make([]byte, 8)
 	if _, err := f.ReadAt(header, int64(record.Offset)); err != nil {
 		return "", err
 	}
-	dataLen := binary.BigEndian.Uint32(header)
+	dataLen := binary.BigEndian.Uint32(header[:4])
+
+	storedCRC := binary.BigEndian.Uint32(header[4:8])
 
 	// 3. Read the actual JSON payload
 	payload := make([]byte, dataLen)
-	if _, err := f.ReadAt(payload, int64(record.Offset)+4); err != nil {
+	if _, err := f.ReadAt(payload, int64(record.Offset)+8); err != nil {
 		return "", err
+	}
+	if crc32.ChecksumIEEE(payload) != storedCRC {
+		return "", fmt.Errorf("checksum mismatch at offset %d: data corrupted", record.Offset)
 	}
 
 	return string(payload), nil
@@ -180,7 +198,7 @@ func (i *Ingestor) getShard(key string) int {
 	// 1. Handle the case where no key is provided (Round Robin or Random)
 	if key == "" {
 		// You could use an atomic counter here to cycle through NumOfShard
-		return int(counter.Add(1) % uint64(i.NumOfShard))
+		return int(i.counter.Add(1) % uint64(i.NumOfShard))
 	}
 
 	// 2. Hash the key into a 32-bit integer
@@ -219,9 +237,76 @@ func (i *Ingestor) getFile(path string) (*os.File, error) {
 	return newF, nil
 }
 
+func (i *Ingestor) recoverShard(shard *Shard) error {
+	files, err := filepath.Glob(filepath.Join(shard.Path, "*.log"))
+	if err != nil {
+		return err
+	}
+
+	sort.Strings(files)
+	for idx, filename := range files {
+		f, err := os.OpenFile(filename, os.O_RDWR, 0644)
+		if err != nil {
+			return err
+		}
+
+		if idx < len(files)-1 {
+			// Sealed segment — hand to cache
+			i.cacheMu.Lock()
+			i.fdCache[filename] = f
+			i.cacheMu.Unlock()
+		} else {
+			shard.ActiveFile = f // last file stays as active
+		}
+
+		var offset int64
+		for {
+			hdr := make([]byte, 8)
+			if _, err := f.ReadAt(hdr, offset); err != nil {
+				break
+			}
+			dataLen := binary.BigEndian.Uint32(hdr[:4])
+			storedCRC := binary.BigEndian.Uint32(hdr[4:8])
+
+			// Read payload
+			payload := make([]byte, dataLen)
+			if _, err := f.ReadAt(payload, offset+8); err != nil {
+				// Truncated write — partial record, trim it
+				f.Truncate(offset)
+				break
+			}
+
+			// Verify integrity
+			if crc32.ChecksumIEEE(payload) != storedCRC {
+				// Corrupt record — trim from here
+				f.Truncate(offset)
+				break
+			}
+
+			// Record is valid — index it
+			shard.OffsetIndex[shard.NextSeqNum] = RecordLocation{
+				Filename: filename,
+				Offset:   uint64(offset),
+			}
+
+			shard.NextSeqNum++
+			offset += 8 + int64(dataLen)
+		}
+		shard.CurrentOffset = offset
+
+	}
+	return nil
+
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	stream := NewIngestor(2, "./data", logger)
+	stream, err := NewIngestor(2, "./data", logger)
+	if err != nil {
+		logger.Error(err.Error())
+		os.Exit(1) // add this
+
+	}
 
 	// g handles the WaitGroup and context for us
 	g, _ := errgroup.WithContext(context.Background())
