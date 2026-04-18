@@ -24,8 +24,7 @@ type RecordLocation struct {
 
 type Shard struct {
 	ID            int
-	CurrentOffset int64  // Physical byte position
-	LastSeqNum    uint64 // Logical ID (1, 2, 3...)
+	CurrentOffset int64 // Physical byte position
 	NextSeqNum    uint64
 	OffsetIndex   map[uint64]RecordLocation
 	mu            sync.RWMutex
@@ -36,7 +35,6 @@ type Shard struct {
 type Ingestor struct {
 	MaxSegmentLength int64
 	NumOfShard       int
-	MaxRecords       int
 	DataDir          string
 	logger           *slog.Logger
 	shards           map[int]*Shard
@@ -51,7 +49,6 @@ func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) (*Ingesto
 		NumOfShard:       numOfShards,
 		DataDir:          dataDir,
 		logger:           logger,
-		MaxRecords:       1000,
 		shards:           make(map[int]*Shard),
 		MaxSegmentLength: 1024, // 1 kb for now
 		fdCache:          make(map[string]*os.File),
@@ -302,12 +299,18 @@ func (i *Ingestor) recoverShard(shard *Shard) error {
 func (i *Ingestor) Close() {
 	i.cacheMu.Lock()
 	defer i.cacheMu.Unlock()
+
+	cacheSet := make(map[*os.File]bool)
+
 	for _, f := range i.fdCache {
+		cacheSet[f] = true
 		f.Close()
 	}
 
-	for _, v := range i.shards {
-		v.ActiveFile.Close()
+	for _, shard := range i.shards {
+		if !cacheSet[shard.ActiveFile] {
+			shard.ActiveFile.Close()
+		}
 	}
 }
 
