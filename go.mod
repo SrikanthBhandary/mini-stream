@@ -1,4 +1,4 @@
-module mini-stream
+module mini_stream
 
 go 1.26.1
 
