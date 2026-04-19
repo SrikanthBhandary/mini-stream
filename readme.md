@@ -65,13 +65,14 @@ Benchmarked on Apple M5 (ARM64), Go 1.26.
 go run cmd/server/main.go
 
 # Terminal 2 — Start the consumer
-go run cmd/consumer/main.go
+go run examples/consumer/main.go -shard=2 -count=50   
 
 # Terminal 3 — Fire the producer
 go run cmd/producer/main.go
 ```
 
 ---
+![MiniStream Architecture](/docs/images/dashboard.png)
 
 ## Key Design Decisions
 
