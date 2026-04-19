@@ -13,6 +13,14 @@ import (
 	"time"
 )
 
+var headerPool = sync.Pool{
+	New: func() interface{} {
+		// Return a new slice of 8 bytes
+		b := make([]byte, 8)
+		return &b
+	},
+}
+
 // RecordLocation is the sequence information
 type RecordLocation struct {
 	Filename string
@@ -23,10 +31,12 @@ type Shard struct {
 	ID            int
 	CurrentOffset int64 // Physical byte position
 	NextSeqNum    uint64
-	OffsetIndex   map[uint64]RecordLocation
+	OffsetIndex   sync.Map
 	mu            sync.RWMutex
 	Path          string
 	ActiveFile    *os.File
+	// to improve the read performance. Since os.Open is costly
+	fdCache map[string]*os.File
 }
 
 type Ingestor struct {
@@ -35,10 +45,7 @@ type Ingestor struct {
 	DataDir          string
 	logger           *slog.Logger
 	shards           map[int]*Shard
-	// to improve the read performance. Since os.Open is costly
-	fdCache map[string]*os.File
-	cacheMu sync.RWMutex
-	counter atomic.Uint64
+	counter          atomic.Uint64
 }
 
 func (i *Ingestor) SetFileSizeLimit(limit int64) {
@@ -52,7 +59,6 @@ func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) (*Ingesto
 		logger:           logger,
 		shards:           make(map[int]*Shard),
 		MaxSegmentLength: 1024, // 1 kb for now
-		fdCache:          make(map[string]*os.File),
 	}
 
 	for s := 0; s < numOfShards; s++ {
@@ -60,9 +66,9 @@ func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) (*Ingesto
 		os.MkdirAll(shardPath, 0755)
 
 		shard := &Shard{
-			ID:          s,
-			Path:        shardPath,
-			OffsetIndex: make(map[uint64]RecordLocation),
+			ID:      s,
+			Path:    shardPath,
+			fdCache: make(map[string]*os.File),
 		}
 
 		if err := i.recoverShard(shard); err != nil {
@@ -100,7 +106,9 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 	byteOffset := shard.CurrentOffset
 
 	// 2. Prepare Header: [4 bytes for data length]
-	header := make([]byte, 8)
+	bufPtr := headerPool.Get().(*[]byte)
+	header := *bufPtr
+	defer headerPool.Put(bufPtr)
 
 	checksum := crc32.ChecksumIEEE(data)
 
@@ -115,9 +123,7 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 
 		// During rotation, hand the old file to the read cache
 		oldName := shard.ActiveFile.Name()
-		i.cacheMu.Lock()
-		i.fdCache[oldName] = shard.ActiveFile // keep it open, readable
-		i.cacheMu.Unlock()
+		shard.fdCache[oldName] = shard.ActiveFile // keep it open, readable
 
 		newActiveFileName := filepath.Join(i.DataDir, fmt.Sprintf("shard-%d", shardID), fmt.Sprintf("%d.log", time.Now().Unix()))
 		f, err := os.OpenFile(newActiveFileName, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
@@ -146,7 +152,7 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 	record := RecordLocation{Filename: shard.ActiveFile.Name(), Offset: uint64(byteOffset)}
 
 	// 4. Update Index and Counters
-	shard.OffsetIndex[seqNum] = record
+	shard.OffsetIndex.Store(seqNum, record)
 	shard.NextSeqNum++
 	shard.CurrentOffset += int64(n1 + n2)
 
@@ -157,22 +163,28 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 
 func (i *Ingestor) Read(shardID int, seqNum uint64) (string, error) {
 	shard := i.shards[shardID]
-	shard.mu.RLock()
-	record, exists := shard.OffsetIndex[seqNum]
-	shard.mu.RUnlock()
+
+	// Read — lookup:
+	val, exists := shard.OffsetIndex.Load(seqNum)
+	if !exists {
+		return "", fmt.Errorf("sequence number not found")
+	}
+	record := val.(RecordLocation)
 
 	if !exists {
 		return "", fmt.Errorf("sequence number not found")
 	}
 
 	// Use our new helper instead of os.OpenFile
-	f, err := i.getFile(record.Filename)
+	f, err := i.getFile(shard, record.Filename)
 	if err != nil {
 		return "", err
 	}
 
 	// 2. Read the 8-byte header to know how much to read
-	header := make([]byte, 8)
+	bufPtr := headerPool.Get().(*[]byte)
+	header := *bufPtr
+
 	if _, err := f.ReadAt(header, int64(record.Offset)); err != nil {
 		return "", err
 	}
@@ -188,7 +200,7 @@ func (i *Ingestor) Read(shardID int, seqNum uint64) (string, error) {
 	if crc32.ChecksumIEEE(payload) != storedCRC {
 		return "", fmt.Errorf("checksum mismatch at offset %d: data corrupted", record.Offset)
 	}
-
+	headerPool.Put(bufPtr)
 	return string(payload), nil
 }
 
@@ -208,20 +220,21 @@ func (i *Ingestor) getShard(key string) int {
 	return int(hashSum % uint32(i.NumOfShard))
 }
 
-func (i *Ingestor) getFile(path string) (*os.File, error) {
-	i.cacheMu.RLock()
-	f, ok := i.fdCache[path]
-	i.cacheMu.RUnlock()
+func (i *Ingestor) getFile(shard *Shard, path string) (*os.File, error) {
+	shard.mu.RLock()
+	f, ok := shard.fdCache[path]
+	shard.mu.RUnlock()
+
 	if ok {
 		return f, nil
 	}
 
 	// Cache miss: Lock for writing
-	i.cacheMu.Lock()
-	defer i.cacheMu.Unlock()
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
 	// Double-check check (in case another thread opened it while we waited for lock)
-	if f, ok := i.fdCache[path]; ok {
+	if f, ok := shard.fdCache[path]; ok {
 		return f, nil
 	}
 
@@ -231,7 +244,7 @@ func (i *Ingestor) getFile(path string) (*os.File, error) {
 		return nil, err
 	}
 
-	i.fdCache[path] = newF
+	shard.fdCache[path] = newF
 	return newF, nil
 }
 
@@ -250,21 +263,22 @@ func (i *Ingestor) recoverShard(shard *Shard) error {
 
 		if idx < len(files)-1 {
 			// Sealed segment — hand to cache
-			i.cacheMu.Lock()
-			i.fdCache[filename] = f
-			i.cacheMu.Unlock()
+			shard.fdCache[filename] = f
 		} else {
 			shard.ActiveFile = f // last file stays as active
 		}
 
 		var offset int64
 		for {
-			hdr := make([]byte, 8)
-			if _, err := f.ReadAt(hdr, offset); err != nil {
+			// 2. Read the 8-byte header to know how much to read
+			bufPtr := headerPool.Get().(*[]byte)
+			header := *bufPtr
+
+			if _, err := f.ReadAt(header, offset); err != nil {
 				break
 			}
-			dataLen := binary.BigEndian.Uint32(hdr[:4])
-			storedCRC := binary.BigEndian.Uint32(hdr[4:8])
+			dataLen := binary.BigEndian.Uint32(header[:4])
+			storedCRC := binary.BigEndian.Uint32(header[4:8])
 
 			// Read payload
 			payload := make([]byte, dataLen)
@@ -281,14 +295,15 @@ func (i *Ingestor) recoverShard(shard *Shard) error {
 				break
 			}
 
-			// Record is valid — index it
-			shard.OffsetIndex[shard.NextSeqNum] = RecordLocation{
+			// recoverShard — store:
+			shard.OffsetIndex.Store(shard.NextSeqNum, RecordLocation{
 				Filename: filename,
 				Offset:   uint64(offset),
-			}
+			})
 
 			shard.NextSeqNum++
 			offset += 8 + int64(dataLen)
+			headerPool.Put(bufPtr)
 		}
 		shard.CurrentOffset = offset
 
@@ -298,19 +313,12 @@ func (i *Ingestor) recoverShard(shard *Shard) error {
 }
 
 func (i *Ingestor) Close() {
-	i.cacheMu.Lock()
-	defer i.cacheMu.Unlock()
-
-	cacheSet := make(map[*os.File]bool)
-
-	for _, f := range i.fdCache {
-		cacheSet[f] = true
-		f.Close()
-	}
-
 	for _, shard := range i.shards {
-		if !cacheSet[shard.ActiveFile] {
-			shard.ActiveFile.Close()
+		shard.mu.Lock()
+		for _, f := range shard.fdCache {
+			f.Close()
 		}
+		shard.ActiveFile.Close()
+		shard.mu.Unlock()
 	}
 }

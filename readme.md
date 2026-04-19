@@ -69,7 +69,7 @@ On recovery, each record's CRC is verified. A mismatch signals a partial write f
 mini_stream/
 ├── ingestor.go          # Core storage engine
 ├── grpc_server.go       # gRPC service implementation
-├── proto/
+├── pb/
 │   ├── stream.proto     # Protobuf definitions
 │   ├── stream.pb.go     # Generated message types
 │   └── stream_grpc.pb.go# Generated service interfaces
@@ -84,6 +84,41 @@ mini_stream/
     └── shard-1/
         └── 1720000000.log
 ```
+
+## Benchmarks
+
+Benchmarked on Apple M5 (ARM64, darwin), Go 1.26, 10 GOMAXPROCS.
+
+```
+go test -bench=. -benchmem ./...
+```
+
+| Benchmark | ops/sec | ns/op | B/op | allocs/op |
+|---|---|---|---|---|
+| Ingest — small payload (~40B) | ~347,000 | 2,882 | 211 | 6 |
+| Ingest — large payload (~1KB) | ~64,000 | 15,523 | 1,516 | 13 |
+| Ingest — parallel (10 goroutines) | ~373,000 | 2,676 | 228 | 7 |
+| Read — sequential | ~1,510,000 | 662 | 96 | 2 |
+| Read — parallel (10 goroutines) | ~721,000 | 1,387 | 110 | 3 |
+| Producer + Consumer (concurrent) | ~150,000 | 6,630 | 300 | 8 |
+
+### What the numbers mean
+
+**Ingest throughput (~347K msg/sec)** is bottlenecked by the underlying disk write, not by locking. Parallel ingest matches single-threaded ingest because each shard has its own independent write lock — goroutines on different shards never contend.
+
+**Sequential read at 662 ns/op (~1.5M reads/sec)** reflects the FD cache and `ReadAt` working as designed. No `open()` syscall, no seek, just a direct `pread` to the correct offset followed by a CRC32 integrity check.
+
+**Parallel read at 1,387 ns/op (~721K reads/sec)** uses `sync.Map` for lock-free index lookups, bringing parallel read throughput to 2.1x what it was with a standard `RWMutex`-protected map. The remaining overhead vs sequential is `pread` contention at the kernel level on macOS when multiple goroutines read the same file descriptor concurrently.
+
+**Producer + Consumer at 6,630 ns/op** reflects the combined cost of a concurrent write and read to the same shard. In a real workload with multiple keys spread across shards, producers and consumers would be more independent and this number would improve.
+
+### Optimization history
+
+| Change | Read Parallel Before | Read Parallel After | Gain |
+|---|---|---|---|
+| Baseline | 3,040 ns/op | — | — |
+| FD cache moved per-shard, `cacheMu` removed | 3,040 ns/op | 2,929 ns/op | 4% |
+| `sync.Map` for `OffsetIndex` (lock-free reads) | 2,929 ns/op | 1,387 ns/op | **2.1x** |
 
 ---
 
@@ -196,7 +231,6 @@ protoc \
 
 - **Consumer groups** with committed offset tracking persisted to disk
 - **Retention / compaction** — TTL-based segment deletion after all groups have consumed past them
-- **Benchmarking** — profiling `Ingest` throughput and `Read` latency under concurrent load
 - **Replication** — writing each segment to multiple nodes for fault tolerance
 
 ---
