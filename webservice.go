@@ -141,11 +141,75 @@ func (ws *WebService) CreateTopic(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (ws *WebService) StartProducer(w http.ResponseWriter, r *http.Request) {
-	topicName := r.FormValue("topicName")
+func (ws *WebService) GetMessagesModal(w http.ResponseWriter, r *http.Request) {
+	topic := r.URL.Query().Get("topic")
+	shardID, _ := strconv.Atoi(r.URL.Query().Get("shard"))
 
-	// Trigger your background worker/stream
-	go ws.Ingestor.StartStreaming(topicName) // Assuming this is your background task
+	fmt.Fprintf(w, `
+<div class="modal-backdrop fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center p-4">
+    <div class="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+        
+        <div class="flex justify-between items-center p-6 border-b border-gray-800">
+            <h2 class="text-xl font-bold">%s — Shard %d</h2>
+            <button onclick="document.getElementById('modal-container').innerHTML=''"
+                class="text-gray-500 hover:text-white text-2xl leading-none">&times;</button>
+        </div>
 
-	w.WriteHeader(http.StatusOK)
+        <div class="p-4 overflow-y-auto flex-1"
+             hx-ext="sse"
+             sse-connect="/api/shard/stream?topic=%s&shard=%d">
+            <div id="message-list"
+                 hx-swap="beforeend"
+                 sse-swap="message"
+                 class="space-y-2">
+                <p class="text-gray-600 text-xs font-mono">Connecting to stream...</p>
+            </div>
+        </div>
+
+    </div>
+</div>`, topic, shardID, topic, shardID)
+}
+
+func (ws *WebService) StreamMessages(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	topicName := r.URL.Query().Get("topic")
+	shardID, _ := strconv.Atoi(r.URL.Query().Get("shard"))
+
+	topic, ok := ws.Ingestor.GetTopic(topicName)
+	if !ok {
+		http.Error(w, "topic not found", http.StatusNotFound)
+		return
+	}
+	shard := topic.Shards[shardID]
+
+	msgChan := shard.Subscribe()
+	defer shard.Unsubscribe(msgChan)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// Send a keepalive comment immediately so browser knows connection is open
+	fmt.Fprintf(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case msg := <-msgChan:
+			// HTMX SSE sse-swap="beforeend" needs event: + data: format
+			html := fmt.Sprintf(
+				`<div class="p-2 bg-gray-800 rounded border border-gray-700 font-mono text-xs">%s</div>`,
+				msg,
+			)
+			fmt.Fprintf(w, "event: message\ndata: %s\n\n", html)
+			flusher.Flush()
+		}
+	}
 }

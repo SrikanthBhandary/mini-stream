@@ -54,10 +54,18 @@ func main() {
 	mux.HandleFunc("GET /api/topics", web.GetTopics)
 	mux.HandleFunc("GET /api/stats", web.GetTotalMessagesInShard)
 	mux.HandleFunc("POST /api/topics/create", web.CreateTopic)
+	mux.HandleFunc("GET /api/shard/messages-modal", web.GetMessagesModal)
+	mux.HandleFunc("GET /api/shard/stream", web.StreamMessages)
+
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
 
 	httpServer := &http.Server{
 		Addr:    *httpAddr,
 		Handler: mux,
+		BaseContext: func(l net.Listener) context.Context {
+			return baseCtx // all request contexts derive from this
+		},
 	}
 
 	// 3. Start Servers
@@ -81,6 +89,7 @@ func main() {
 
 	// Block until a signal is received
 	<-quit
+
 	logger.Info("Shutdown signal received, starting graceful shutdown...")
 
 	// Create a timeout context to ensure shutdown doesn't hang forever
@@ -94,6 +103,11 @@ func main() {
 
 	// Shutdown gRPC
 	grpcServer.GracefulStop()
+
+	// 3. THE GATE: Wait for active Ingest operations to finish
+	logger.Info("Waiting for active ingestion to finish...")
+	stream.WaitForPendingWrites() // <--- NEW: This waits for the wg
+	logger.Info("Ingestion operations complete.")
 
 	// Finally, close the Ingestor
 	stream.Close()

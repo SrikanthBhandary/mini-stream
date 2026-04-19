@@ -12,11 +12,11 @@ type GrpcServer struct {
 }
 
 func (s *GrpcServer) Ingest(ctx context.Context, req *pb.IngestRequest) (*pb.IngestResponse, error) {
-	seqNum, _, err := s.Ingestor.Ingest(req.Topic, req.Key, req.Payload)
+	seqNum, shardID, err := s.Ingestor.Ingest(req.Topic, req.Key, req.Payload)
 	if err != nil {
 		return nil, err
 	}
-	return &pb.IngestResponse{SeqNum: seqNum}, nil
+	return &pb.IngestResponse{SeqNum: seqNum, ShardId: int32(shardID)}, nil
 }
 
 func (s *GrpcServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {

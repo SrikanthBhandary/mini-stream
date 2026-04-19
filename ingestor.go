@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"log/slog"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,18 +34,6 @@ type Topic struct {
 	NumShards int            // number of shards per topic
 }
 
-type Shard struct {
-	ID            int
-	CurrentOffset int64 // Physical byte position
-	NextSeqNum    uint64
-	OffsetIndex   sync.Map
-	mu            sync.RWMutex
-	Path          string
-	ActiveFile    *os.File
-	// to improve the read performance. Since os.Open is costly
-	fdCache map[string]*os.File
-}
-
 type Ingestor struct {
 	topics           map[string]*Topic
 	MaxSegmentLength int64
@@ -55,6 +42,7 @@ type Ingestor struct {
 	counter          atomic.Uint64
 	mu               sync.RWMutex
 	cancelRetention  context.CancelFunc
+	wg               sync.WaitGroup
 }
 
 func (i *Ingestor) SetFileSizeLimit(limit int64) {
@@ -168,6 +156,8 @@ func NewIngestor(dataDir string, logger *slog.Logger) (*Ingestor, error) {
 }
 
 func (i *Ingestor) Ingest(topicName, key, payload string) (uint64, int, error) {
+	i.wg.Add(1)
+	defer i.wg.Done()
 
 	i.mu.RLock()
 	topic, exists := i.topics[topicName]
@@ -202,6 +192,11 @@ func (i *Ingestor) Ingest(topicName, key, payload string) (uint64, int, error) {
 
 	if shard.CurrentOffset+int64(len(data))+8 > i.MaxSegmentLength {
 		i.logger.Info("Rotating the current active segment file", "shard", shard, "file", shard.ActiveFile.Name())
+
+		err := shard.ActiveFile.Sync()
+		if err != nil {
+			i.logger.Error("failed to sync file during rotation", "err", err)
+		}
 
 		// During rotation, hand the old file to the read cache
 		oldName := shard.ActiveFile.Name()
@@ -241,6 +236,10 @@ func (i *Ingestor) Ingest(topicName, key, payload string) (uint64, int, error) {
 	shard.CurrentOffset += int64(n1 + n2)
 
 	i.logger.Info("written to disk", "shard", shardID, "offset", byteOffset)
+
+	// BROADCAST HERE:
+	shard.Broadcast(payload)
+
 	return seqNum, shardID, nil
 
 }
@@ -254,13 +253,6 @@ func (i *Ingestor) Read(topicName string, shardID int, seqNum uint64) (string, e
 	}
 
 	shard := topic.Shards[shardID]
-
-	// DEBUG: Dump the index state
-	count := 0
-	shard.OffsetIndex.Range(func(k, v any) bool {
-		count++
-		return true
-	})
 
 	// Read — lookup:
 	val, exists := shard.OffsetIndex.Load(seqNum)
@@ -376,14 +368,17 @@ func (i *Ingestor) recoverShard(shard *Shard) error {
 			// Read payload
 			payload := make([]byte, dataLen)
 			if _, err := f.ReadAt(payload, offset+8); err != nil {
-				// Truncated write — partial record, trim it
+				i.logger.Warn("Partial write detected, truncating file", "file", filename, "err", err)
 				f.Truncate(offset)
 				break
 			}
 
 			// Verify integrity
 			if crc32.ChecksumIEEE(payload) != storedCRC {
-				// Corrupt record — trim from here
+				i.logger.Error("CORRUPTION DETECTED: Checksum mismatch",
+					"seq", shard.NextSeqNum,
+					"file", filename,
+					"offset", offset)
 				f.Truncate(offset)
 				break
 			}
@@ -413,6 +408,7 @@ func (i *Ingestor) Close() {
 	for _, topic := range i.topics {
 		for _, shard := range topic.Shards {
 			shard.mu.Lock()
+			shard.ActiveFile.Sync() // ← flush OS buffer to disk
 			for _, f := range shard.fdCache {
 				f.Close()
 			}
@@ -501,43 +497,11 @@ func (i *Ingestor) GetShardStats(topicName string, shardID int) (int, error) {
 	if !ok {
 		return 0, fmt.Errorf("topic not found")
 	}
-
 	shard := topic.Shards[shardID]
-	// Calculate count by iterating or reading a counter
-	count := 0
-	shard.OffsetIndex.Range(func(_, _ any) bool { count++; return true })
+	shard.mu.RLock()
+	count := int(shard.NextSeqNum)
+	shard.mu.RUnlock()
 	return count, nil
-}
-
-// StartStreaming is just for demonstrate
-func (i *Ingestor) StartStreaming(topicName string) {
-	// 1. Get the topic safely
-	topic, ok := i.GetTopic(topicName)
-	if !ok {
-		fmt.Printf("Topic %s not found\n", topicName)
-		return
-	}
-
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	shardCounter := 0
-
-	for range ticker.C {
-		// Use the length of the shards slice from the retrieved topic
-		shardIdx := shardCounter % len(topic.Shards)
-
-		// Ensure you are accessing the specific shard
-		// (Assuming topic.Shards is a slice of pointers, or modifying the struct is fine here)
-		shard := topic.Shards[shardIdx]
-
-		data := fmt.Sprintf("Event-%d", rand.Intn(1000))
-
-		// This is now safe as long as OffsetIndex is a sync.Map or similar
-		shard.OffsetIndex.Store(time.Now().UnixNano(), data)
-
-		shardCounter++
-	}
 }
 
 // GetTopic returns the topic safely
@@ -546,4 +510,9 @@ func (i *Ingestor) GetTopic(name string) (*Topic, bool) {
 	defer i.mu.RUnlock()
 	topic, ok := i.topics[name]
 	return topic, ok
+}
+
+// Add this to ingestor.go
+func (i *Ingestor) WaitForPendingWrites() {
+	i.wg.Wait()
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"mini_stream/pb"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -38,7 +37,7 @@ func main() {
 
 	fmt.Println("🚀 Producer starting — sending 10 messages...")
 
-	for j := 0; j < 10; j++ {
+	for j := 0; j < 1000; j++ {
 		payload := fmt.Sprintf(`{"event":"order_placed","order_id":%d,"user":"user-1"}`, j)
 
 		resp, err := client.Ingest(context.Background(), &pb.IngestRequest{
@@ -52,7 +51,7 @@ func main() {
 		}
 
 		fmt.Printf("✅ Sent   seq=%d  shard=%d  payload=%s\n", resp.SeqNum, resp.ShardId, payload)
-		time.Sleep(500 * time.Millisecond)
+		// time.Sleep(500 * time.Millisecond)
 	}
 
 	fmt.Println("✅ Producer done.")
