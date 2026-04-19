@@ -53,6 +53,7 @@ func main() {
 	mux.HandleFunc("GET /api/stats-fragment", web.GetStatsFragment)
 	mux.HandleFunc("GET /api/topics", web.GetTopics)
 	mux.HandleFunc("GET /api/stats", web.GetTotalMessagesInShard)
+	mux.HandleFunc("POST /api/topics/create", web.CreateTopic)
 
 	httpServer := &http.Server{
 		Addr:    *httpAddr,

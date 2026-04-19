@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"log/slog"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -506,4 +507,43 @@ func (i *Ingestor) GetShardStats(topicName string, shardID int) (int, error) {
 	count := 0
 	shard.OffsetIndex.Range(func(_, _ any) bool { count++; return true })
 	return count, nil
+}
+
+// StartStreaming is just for demonstrate
+func (i *Ingestor) StartStreaming(topicName string) {
+	// 1. Get the topic safely
+	topic, ok := i.GetTopic(topicName)
+	if !ok {
+		fmt.Printf("Topic %s not found\n", topicName)
+		return
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	shardCounter := 0
+
+	for range ticker.C {
+		// Use the length of the shards slice from the retrieved topic
+		shardIdx := shardCounter % len(topic.Shards)
+
+		// Ensure you are accessing the specific shard
+		// (Assuming topic.Shards is a slice of pointers, or modifying the struct is fine here)
+		shard := topic.Shards[shardIdx]
+
+		data := fmt.Sprintf("Event-%d", rand.Intn(1000))
+
+		// This is now safe as long as OffsetIndex is a sync.Map or similar
+		shard.OffsetIndex.Store(time.Now().UnixNano(), data)
+
+		shardCounter++
+	}
+}
+
+// GetTopic returns the topic safely
+func (i *Ingestor) GetTopic(name string) (*Topic, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	topic, ok := i.topics[name]
+	return topic, ok
 }

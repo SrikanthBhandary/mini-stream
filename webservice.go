@@ -117,3 +117,35 @@ func (ws *WebService) GetDashboardData() DashboardData {
 	}
 	return data
 }
+
+func (ws *WebService) CreateTopic(w http.ResponseWriter, r *http.Request) {
+	topicName := r.FormValue("topicName")
+	shardStr := r.FormValue("shardCount")
+
+	shardCount, err := strconv.Atoi(shardStr)
+	if err != nil {
+		shardCount = 1
+	}
+
+	// REMOVE THESE TWO LINES:
+	// ws.Ingestor.mu.Lock()
+	// ws.Ingestor.mu.Unlock()
+
+	// Just call the method; it handles its own locking internally!
+	err = ws.Ingestor.CreateTopic(topicName, shardCount)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (ws *WebService) StartProducer(w http.ResponseWriter, r *http.Request) {
+	topicName := r.FormValue("topicName")
+
+	// Trigger your background worker/stream
+	go ws.Ingestor.StartStreaming(topicName) // Assuming this is your background task
+
+	w.WriteHeader(http.StatusOK)
+}

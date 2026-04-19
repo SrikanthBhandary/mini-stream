@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,6 +8,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
 </head>
+
 <body class="bg-gray-950 text-gray-100 min-h-screen p-8">
 
     <header class="max-w-6xl mx-auto mb-10">
@@ -17,7 +19,20 @@
     </header>
 
     <main class="max-w-6xl mx-auto space-y-12">
-        
+        <form hx-post="/api/topics/create" hx-swap="none" hx-on::after-request="location.reload()">
+            <label class="block text-sm text-gray-400 mb-2">Create New Topic</label>
+            <div class="flex gap-2">
+                <input type="text" name="topicName" placeholder="Topic Name" required
+                    class="flex-1 bg-gray-950 border border-gray-700 rounded px-4 py-2 outline-none">
+
+                <input type="number" name="shardCount" placeholder="Shards" min="1" max="10" value="1"
+                    class="w-20 bg-gray-950 border border-gray-700 rounded px-4 py-2 outline-none">
+
+                <button type="submit"
+                    class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded font-semibold">Create</button>
+            </div>
+        </form>
+
         {{range .Topics}}
         <section>
             <div class="flex items-center gap-4 mb-6">
@@ -26,21 +41,21 @@
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                
+
                 {{range .Shards}}
-                <div class="bg-gray-900 border border-gray-800 rounded-xl p-6 shadow-sm hover:border-blue-900 transition-colors">
+                <div
+                    class="bg-gray-900 border border-gray-800 rounded-xl p-6 shadow-sm hover:border-blue-900 transition-colors">
                     <div class="flex justify-between items-start mb-4">
                         <span class="text-sm font-semibold text-blue-400 uppercase tracking-wider">Shard {{.ID}}</span>
                         <span class="text-xs text-gray-600 bg-gray-800 px-2 py-1 rounded">Active</span>
                     </div>
-                    
+
                     <div class="text-gray-400 text-sm mb-1">Total Messages</div>
-                    
+
                     <div class="text-4xl font-mono font-bold text-white"
-                         hx-get="/api/stats-fragment?topic={{.TopicName}}&shard={{.ID}}"
-                         hx-trigger="every 2s"
-                         hx-swap="innerHTML">
-                         {{.Count}}
+                        hx-get="/api/stats-fragment?topic={{.TopicName}}&shard={{.ID}}" hx-trigger="every 2s"
+                        hx-swap="innerHTML">
+                        {{.Count}}
                     </div>
                 </div>
                 {{end}}
@@ -55,4 +70,5 @@
     </main>
 
 </body>
+
 </html>
