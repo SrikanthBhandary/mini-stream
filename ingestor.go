@@ -1,6 +1,7 @@
 package mini_stream
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -46,6 +47,7 @@ type Ingestor struct {
 	logger           *slog.Logger
 	shards           map[int]*Shard
 	counter          atomic.Uint64
+	cancelRetention  context.CancelFunc
 }
 
 func (i *Ingestor) SetFileSizeLimit(limit int64) {
@@ -87,6 +89,10 @@ func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) (*Ingesto
 
 		i.shards[s] = shard
 	}
+
+	// Start background retention after all shards are ready
+	i.startRetention(24 * time.Hour) // keep last 24 hours
+
 	return i, nil
 }
 
@@ -171,10 +177,6 @@ func (i *Ingestor) Read(shardID int, seqNum uint64) (string, error) {
 	}
 	record := val.(RecordLocation)
 
-	if !exists {
-		return "", fmt.Errorf("sequence number not found")
-	}
-
 	// Use our new helper instead of os.OpenFile
 	f, err := i.getFile(shard, record.Filename)
 	if err != nil {
@@ -184,6 +186,7 @@ func (i *Ingestor) Read(shardID int, seqNum uint64) (string, error) {
 	// 2. Read the 8-byte header to know how much to read
 	bufPtr := headerPool.Get().(*[]byte)
 	header := *bufPtr
+	defer headerPool.Put(bufPtr)
 
 	if _, err := f.ReadAt(header, int64(record.Offset)); err != nil {
 		return "", err
@@ -200,7 +203,7 @@ func (i *Ingestor) Read(shardID int, seqNum uint64) (string, error) {
 	if crc32.ChecksumIEEE(payload) != storedCRC {
 		return "", fmt.Errorf("checksum mismatch at offset %d: data corrupted", record.Offset)
 	}
-	headerPool.Put(bufPtr)
+
 	return string(payload), nil
 }
 
@@ -271,14 +274,12 @@ func (i *Ingestor) recoverShard(shard *Shard) error {
 		var offset int64
 		for {
 			// 2. Read the 8-byte header to know how much to read
-			bufPtr := headerPool.Get().(*[]byte)
-			header := *bufPtr
-
-			if _, err := f.ReadAt(header, offset); err != nil {
+			hdr := make([]byte, 8) // plain alloc, no pool needed at startup
+			if _, err := f.ReadAt(hdr, offset); err != nil {
 				break
 			}
-			dataLen := binary.BigEndian.Uint32(header[:4])
-			storedCRC := binary.BigEndian.Uint32(header[4:8])
+			dataLen := binary.BigEndian.Uint32(hdr[:4])
+			storedCRC := binary.BigEndian.Uint32(hdr[4:8])
 
 			// Read payload
 			payload := make([]byte, dataLen)
@@ -303,7 +304,6 @@ func (i *Ingestor) recoverShard(shard *Shard) error {
 
 			shard.NextSeqNum++
 			offset += 8 + int64(dataLen)
-			headerPool.Put(bufPtr)
 		}
 		shard.CurrentOffset = offset
 
@@ -313,12 +313,75 @@ func (i *Ingestor) recoverShard(shard *Shard) error {
 }
 
 func (i *Ingestor) Close() {
+	if i.cancelRetention != nil {
+		i.cancelRetention()
+	}
+
 	for _, shard := range i.shards {
 		shard.mu.Lock()
 		for _, f := range shard.fdCache {
 			f.Close()
 		}
 		shard.ActiveFile.Close()
+		shard.mu.Unlock()
+	}
+}
+
+func (i *Ingestor) startRetention(ttl time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	i.cancelRetention = cancel
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				i.runRetention(ttl)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func (i *Ingestor) runRetention(ttl time.Duration) {
+	cutoff := time.Now().Add(-ttl).Unix()
+
+	for _, shard := range i.shards {
+		shard.mu.Lock()
+
+		files, _ := filepath.Glob(filepath.Join(shard.Path, "*.log"))
+		sort.Strings(files)
+
+		for _, filename := range files {
+			// Never delete the active file
+			if filename == shard.ActiveFile.Name() {
+				continue
+			}
+
+			// Parse timestamp from filename
+			base := filepath.Base(filename)
+			var ts int64
+			fmt.Sscanf(base, "%d.log", &ts)
+
+			if ts < cutoff {
+				// Evict from fd cache
+				if f, ok := shard.fdCache[filename]; ok {
+					f.Close()
+					delete(shard.fdCache, filename)
+				}
+				// 2. Evict index entries pointing to this file
+				shard.OffsetIndex.Range(func(key, value any) bool {
+					loc := value.(RecordLocation)
+					if loc.Filename == filename {
+						shard.OffsetIndex.Delete(key)
+					}
+					return true
+				})
+				os.Remove(filename)
+				i.logger.Info("compacted segment", "file", filename)
+			}
+		}
 		shard.mu.Unlock()
 	}
 }
