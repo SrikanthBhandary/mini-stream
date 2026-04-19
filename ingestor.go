@@ -483,3 +483,27 @@ func (i *Ingestor) runRetention(ttl time.Duration) {
 	}
 
 }
+func (i *Ingestor) ListTopics() []string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	topics := make([]string, 0, len(i.topics))
+	for name := range i.topics {
+		topics = append(topics, name)
+	}
+	return topics
+}
+
+func (i *Ingestor) GetShardStats(topicName string, shardID int) (int, error) {
+	i.mu.RLock()
+	topic, ok := i.topics[topicName]
+	i.mu.RUnlock()
+	if !ok {
+		return 0, fmt.Errorf("topic not found")
+	}
+
+	shard := topic.Shards[shardID]
+	// Calculate count by iterating or reading a counter
+	count := 0
+	shard.OffsetIndex.Range(func(_, _ any) bool { count++; return true })
+	return count, nil
+}
