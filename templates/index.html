@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini-Stream Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen p-8">
+
+    <header class="max-w-6xl mx-auto mb-10">
+        <h1 class="text-4xl font-extrabold tracking-tight">
+            Mini-Stream <span class="text-blue-500">Dashboard</span>
+        </h1>
+        <p class="text-gray-400 mt-2">Real-time observability for your log-structured storage.</p>
+    </header>
+
+    <main class="max-w-6xl mx-auto space-y-12">
+        
+        {{range .Topics}}
+        <section>
+            <div class="flex items-center gap-4 mb-6">
+                <h2 class="text-2xl font-bold border-l-4 border-blue-500 pl-4">Topic: {{.Name}}</h2>
+                <div class="h-px flex-1 bg-gray-800"></div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                
+                {{range .Shards}}
+                <div class="bg-gray-900 border border-gray-800 rounded-xl p-6 shadow-sm hover:border-blue-900 transition-colors">
+                    <div class="flex justify-between items-start mb-4">
+                        <span class="text-sm font-semibold text-blue-400 uppercase tracking-wider">Shard {{.ID}}</span>
+                        <span class="text-xs text-gray-600 bg-gray-800 px-2 py-1 rounded">Active</span>
+                    </div>
+                    
+                    <div class="text-gray-400 text-sm mb-1">Total Messages</div>
+                    
+                    <div class="text-4xl font-mono font-bold text-white"
+                         hx-get="/api/stats-fragment?topic={{.TopicName}}&shard={{.ID}}"
+                         hx-trigger="every 2s"
+                         hx-swap="innerHTML">
+                         {{.Count}}
+                    </div>
+                </div>
+                {{end}}
+            </div>
+        </section>
+        {{else}}
+        <div class="text-center py-20 border-2 border-dashed border-gray-800 rounded-xl">
+            <p class="text-gray-500">No topics found. Start your producer to see activity.</p>
+        </div>
+        {{end}}
+
+    </main>
+
+</body>
+</html>

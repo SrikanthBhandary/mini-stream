@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"text/template"
 	"time"
 
 	"google.golang.org/grpc"
@@ -38,8 +39,18 @@ func main() {
 	grpcServer := grpc.NewServer()
 	pb.RegisterStreamServiceServer(grpcServer, &mini_stream.GrpcServer{Ingestor: stream})
 
-	web := mini_stream.NewWebService(stream)
 	mux := http.NewServeMux()
+
+	// In main.go
+	// 1. Initialize templates
+	tmpl := template.Must(template.ParseGlob("templates/*.html"))
+	web := &mini_stream.WebService{
+		Ingestor:  stream,
+		Templates: tmpl,
+	}
+
+	mux.HandleFunc("GET /", web.ServeDashboard)
+	mux.HandleFunc("GET /api/stats-fragment", web.GetStatsFragment)
 	mux.HandleFunc("GET /api/topics", web.GetTopics)
 	mux.HandleFunc("GET /api/stats", web.GetTotalMessagesInShard)
 
