@@ -8,7 +8,6 @@ package pb
 
 import (
 	context "context"
-
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -20,14 +19,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StreamService_Ingest_FullMethodName = "/mini_stream.StreamService/Ingest"
-	StreamService_Read_FullMethodName   = "/mini_stream.StreamService/Read"
+	StreamService_CreateTopic_FullMethodName = "/mini_stream.StreamService/CreateTopic"
+	StreamService_Ingest_FullMethodName      = "/mini_stream.StreamService/Ingest"
+	StreamService_Read_FullMethodName        = "/mini_stream.StreamService/Read"
 )
 
 // StreamServiceClient is the client API for StreamService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type StreamServiceClient interface {
+	CreateTopic(ctx context.Context, in *CreateTopicRequest, opts ...grpc.CallOption) (*CreateTopicResponse, error)
 	Ingest(ctx context.Context, in *IngestRequest, opts ...grpc.CallOption) (*IngestResponse, error)
 	Read(ctx context.Context, in *ReadRequest, opts ...grpc.CallOption) (*ReadResponse, error)
 }
@@ -38,6 +39,16 @@ type streamServiceClient struct {
 
 func NewStreamServiceClient(cc grpc.ClientConnInterface) StreamServiceClient {
 	return &streamServiceClient{cc}
+}
+
+func (c *streamServiceClient) CreateTopic(ctx context.Context, in *CreateTopicRequest, opts ...grpc.CallOption) (*CreateTopicResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateTopicResponse)
+	err := c.cc.Invoke(ctx, StreamService_CreateTopic_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *streamServiceClient) Ingest(ctx context.Context, in *IngestRequest, opts ...grpc.CallOption) (*IngestResponse, error) {
@@ -64,6 +75,7 @@ func (c *streamServiceClient) Read(ctx context.Context, in *ReadRequest, opts ..
 // All implementations must embed UnimplementedStreamServiceServer
 // for forward compatibility.
 type StreamServiceServer interface {
+	CreateTopic(context.Context, *CreateTopicRequest) (*CreateTopicResponse, error)
 	Ingest(context.Context, *IngestRequest) (*IngestResponse, error)
 	Read(context.Context, *ReadRequest) (*ReadResponse, error)
 	mustEmbedUnimplementedStreamServiceServer()
@@ -76,6 +88,9 @@ type StreamServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedStreamServiceServer struct{}
 
+func (UnimplementedStreamServiceServer) CreateTopic(context.Context, *CreateTopicRequest) (*CreateTopicResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateTopic not implemented")
+}
 func (UnimplementedStreamServiceServer) Ingest(context.Context, *IngestRequest) (*IngestResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Ingest not implemented")
 }
@@ -101,6 +116,24 @@ func RegisterStreamServiceServer(s grpc.ServiceRegistrar, srv StreamServiceServe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&StreamService_ServiceDesc, srv)
+}
+
+func _StreamService_CreateTopic_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTopicRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StreamServiceServer).CreateTopic(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StreamService_CreateTopic_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StreamServiceServer).CreateTopic(ctx, req.(*CreateTopicRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _StreamService_Ingest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -146,6 +179,10 @@ var StreamService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "mini_stream.StreamService",
 	HandlerType: (*StreamServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateTopic",
+			Handler:    _StreamService_CreateTopic_Handler,
+		},
 		{
 			MethodName: "Ingest",
 			Handler:    _StreamService_Ingest_Handler,

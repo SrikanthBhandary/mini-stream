@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"mini_stream/pb"
@@ -11,7 +12,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+const topic = "orders"
+
 func main() {
+	shard := flag.Int("shard", 0, "shard to consume from")
+	count := flag.Int("count", 10, "number of messages to consume")
+	flag.Parse()
+
 	conn, err := grpc.NewClient("localhost:50051",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
@@ -22,16 +29,17 @@ func main() {
 
 	client := pb.NewStreamServiceClient(conn)
 
-	fmt.Println("👂 Consumer starting — reading from shard 0...")
+	fmt.Printf("👂 Consumer starting — topic=%s shard=%d\n", topic, *shard)
 
 	var next uint64
 	for {
 		resp, err := client.Read(context.Background(), &pb.ReadRequest{
-			ShardId: 0,
+			Topic:   topic,
+			ShardId: int32(*shard),
 			SeqNum:  next,
 		})
 		if err != nil {
-			// Not yet available — poll
+			fmt.Printf("❌ ERROR: Failed to read seq=%d: %v\n", next, err)
 			fmt.Printf("⏳ Waiting for seq=%d...\n", next)
 			time.Sleep(500 * time.Millisecond)
 			continue
@@ -40,8 +48,7 @@ func main() {
 		fmt.Printf("📨 Received seq=%d  payload=%s\n", next, resp.Payload)
 		next++
 
-		// Stop after 10 messages for the demo
-		if next >= 10 {
+		if next >= uint64(*count) {
 			break
 		}
 	}

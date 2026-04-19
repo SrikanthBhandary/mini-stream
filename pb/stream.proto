@@ -4,22 +4,35 @@ package mini_stream;
 option go_package = "./pb";
 
 service StreamService{
+    rpc CreateTopic(CreateTopicRequest) returns (CreateTopicResponse);
     rpc Ingest(IngestRequest) returns (IngestResponse);
     rpc Read(ReadRequest) returns (ReadResponse);
 }
 
 message IngestRequest {
-  string key = 1;
-  string payload = 2;
+  string topic   = 1;
+  string key     = 2;
+  string payload = 3;
 }
 
 message IngestResponse {
   uint64 seq_num = 1;
+  int32  shard_id = 2;  // added — consumer needs this to know where to read
+}
+
+message CreateTopicRequest {
+    string topic      = 1;
+    int32  num_shards = 2;
+}
+
+message CreateTopicResponse {
+    bool success = 1;
 }
 
 message ReadRequest {
-  int32 shard_id = 1;
-  uint64 seq_num = 2;
+  string topic    = 1;
+  int32  shard_id = 2;
+  uint64 seq_num  = 3;
 }
 
 message ReadResponse {

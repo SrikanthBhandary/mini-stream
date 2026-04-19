@@ -2,6 +2,7 @@ package mini_stream
 
 import (
 	"context"
+	"log"
 	"mini_stream/pb"
 )
 
@@ -11,7 +12,7 @@ type GrpcServer struct {
 }
 
 func (s *GrpcServer) Ingest(ctx context.Context, req *pb.IngestRequest) (*pb.IngestResponse, error) {
-	seqNum, err := s.Ingestor.Ingest(req.Key, req.Payload)
+	seqNum, _, err := s.Ingestor.Ingest(req.Topic, req.Key, req.Payload)
 	if err != nil {
 		return nil, err
 	}
@@ -19,9 +20,19 @@ func (s *GrpcServer) Ingest(ctx context.Context, req *pb.IngestRequest) (*pb.Ing
 }
 
 func (s *GrpcServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
-	payload, err := s.Ingestor.Read(int(req.ShardId), req.SeqNum)
+	log.Printf("DEBUG: Received Read request for topic=%s, shard=%d, seq=%d", req.Topic, req.ShardId, req.SeqNum)
+	payload, err := s.Ingestor.Read(req.Topic, int(req.ShardId), req.SeqNum)
 	if err != nil {
+		log.Printf("DEBUG: Read failed: %v", err) // Log the specific error
 		return nil, err
 	}
 	return &pb.ReadResponse{Payload: payload}, nil
+}
+
+func (s *GrpcServer) CreateTopic(ctx context.Context, req *pb.CreateTopicRequest) (*pb.CreateTopicResponse, error) {
+	err := s.Ingestor.CreateTopic(req.Topic, int(req.NumShards))
+	if err != nil {
+		return &pb.CreateTopicResponse{Success: false}, err
+	}
+	return &pb.CreateTopicResponse{Success: true}, nil
 }

@@ -28,6 +28,12 @@ type RecordLocation struct {
 	Offset   uint64
 }
 
+type Topic struct {
+	Name      string         // name of the topic
+	Shards    map[int]*Shard // map of the shard
+	NumShards int            // number of shards per topic
+}
+
 type Shard struct {
 	ID            int
 	CurrentOffset int64 // Physical byte position
@@ -41,12 +47,12 @@ type Shard struct {
 }
 
 type Ingestor struct {
+	topics           map[string]*Topic
 	MaxSegmentLength int64
-	NumOfShard       int
 	DataDir          string
 	logger           *slog.Logger
-	shards           map[int]*Shard
 	counter          atomic.Uint64
+	mu               sync.RWMutex
 	cancelRetention  context.CancelFunc
 }
 
@@ -54,17 +60,22 @@ func (i *Ingestor) SetFileSizeLimit(limit int64) {
 	i.MaxSegmentLength = limit
 }
 
-func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) (*Ingestor, error) {
-	i := &Ingestor{
-		NumOfShard:       numOfShards,
-		DataDir:          dataDir,
-		logger:           logger,
-		shards:           make(map[int]*Shard),
-		MaxSegmentLength: 1024, // 1 kb for now
+func (i *Ingestor) CreateTopic(name string, numShards int) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if _, exists := i.topics[name]; exists {
+		return fmt.Errorf("topic %s already exists", name)
 	}
 
-	for s := 0; s < numOfShards; s++ {
-		shardPath := filepath.Join(dataDir, fmt.Sprintf("shard-%d", s))
+	topic := &Topic{
+		Name:      name,
+		NumShards: numShards,
+		Shards:    make(map[int]*Shard),
+	}
+
+	for s := 0; s < numShards; s++ {
+		shardPath := filepath.Join(i.DataDir, name, fmt.Sprintf("shard-%d", s))
 		os.MkdirAll(shardPath, 0755)
 
 		shard := &Shard{
@@ -74,20 +85,79 @@ func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) (*Ingesto
 		}
 
 		if err := i.recoverShard(shard); err != nil {
-			return nil, err // propagate instead of panic
+			return err
 		}
 
-		// If no existing files found, create a fresh active file
 		if shard.ActiveFile == nil {
 			filename := filepath.Join(shardPath, fmt.Sprintf("%d.log", time.Now().Unix()))
 			f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			shard.ActiveFile = f
 		}
+		topic.Shards[s] = shard
+	}
 
-		i.shards[s] = shard
+	i.topics[name] = topic
+	return nil
+}
+
+func (i *Ingestor) RecoverTopics() error {
+	// Scan dataDir for topic directories
+	entries, err := os.ReadDir(i.DataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // fresh start, no topics yet
+		}
+		return err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		topicName := entry.Name()
+
+		// Count shards by scanning shard-N directories
+		shardEntries, err := os.ReadDir(filepath.Join(i.DataDir, topicName))
+		if err != nil {
+			continue
+		}
+
+		numShards := 0
+		for _, se := range shardEntries {
+			if se.IsDir() {
+				numShards++
+			}
+		}
+		if numShards == 0 {
+			continue
+		}
+
+		i.logger.Info("recovering topic", "topic", topicName, "shards", numShards)
+		if err := i.CreateTopic(topicName, numShards); err != nil {
+			// Already exists is fine
+			i.logger.Info("topic already exists", "topic", topicName)
+		}
+	}
+	return nil
+}
+
+func NewIngestor(dataDir string, logger *slog.Logger) (*Ingestor, error) {
+	cwd, _ := os.Getwd()
+	logger.Info("Starting Ingestor", "working_dir", cwd, "data_dir", dataDir)
+
+	i := &Ingestor{
+		DataDir:          dataDir,
+		logger:           logger,
+		MaxSegmentLength: 1024, // 1 kb for now
+		topics:           make(map[string]*Topic),
+	}
+
+	// Recover existing topics from disk
+	if err := i.RecoverTopics(); err != nil {
+		return nil, err
 	}
 
 	// Start background retention after all shards are ready
@@ -96,20 +166,25 @@ func NewIngestor(numOfShards int, dataDir string, logger *slog.Logger) (*Ingesto
 	return i, nil
 }
 
-func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
-	//Calculate the Shard
-	shardID := i.getShard(key)
+func (i *Ingestor) Ingest(topicName, key, payload string) (uint64, int, error) {
 
-	shard := i.shards[shardID]
+	i.mu.RLock()
+	topic, exists := i.topics[topicName]
+	i.mu.RUnlock()
+	if !exists {
+		return 0, 0, fmt.Errorf("topic %s not found", topicName)
+	}
+
+	//Calculate the Shard
+	shardID := i.getShard(key, topic.NumShards)
+
+	shard := topic.Shards[shardID]
 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
 	data := []byte(payload)
 	seqNum := shard.NextSeqNum
-
-	// 1. Record the current byte position before writing
-	byteOffset := shard.CurrentOffset
 
 	// 2. Prepare Header: [4 bytes for data length]
 	bufPtr := headerPool.Get().(*[]byte)
@@ -131,27 +206,29 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 		oldName := shard.ActiveFile.Name()
 		shard.fdCache[oldName] = shard.ActiveFile // keep it open, readable
 
-		newActiveFileName := filepath.Join(i.DataDir, fmt.Sprintf("shard-%d", shardID), fmt.Sprintf("%d.log", time.Now().Unix()))
+		newActiveFileName := filepath.Join(i.DataDir, topicName, fmt.Sprintf("shard-%d", shardID), fmt.Sprintf("%d.log", time.Now().Unix()))
+
 		f, err := os.OpenFile(newActiveFileName, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 		if err != nil {
-			return seqNum, err
+			return seqNum, shardID, err
 		}
 		shard.CurrentOffset = 0
 		shard.ActiveFile = f
-		byteOffset = 0
 
 	}
+	// 1. Record the current byte position before writing
+	byteOffset := shard.CurrentOffset
 
 	// 3. Write Header + Data
 	// Total written = 4 + len(data)
 	n1, err := shard.ActiveFile.Write(header)
 	if err != nil {
-		return seqNum, err
+		return seqNum, shardID, err
 	}
 
 	n2, err := shard.ActiveFile.Write(data)
 	if err != nil {
-		return seqNum, err
+		return seqNum, shardID, err
 	}
 
 	// Create New Record
@@ -163,12 +240,26 @@ func (i *Ingestor) Ingest(key string, payload string) (uint64, error) {
 	shard.CurrentOffset += int64(n1 + n2)
 
 	i.logger.Info("written to disk", "shard", shardID, "offset", byteOffset)
-	return seqNum, nil
+	return seqNum, shardID, nil
 
 }
 
-func (i *Ingestor) Read(shardID int, seqNum uint64) (string, error) {
-	shard := i.shards[shardID]
+func (i *Ingestor) Read(topicName string, shardID int, seqNum uint64) (string, error) {
+	i.mu.RLock()
+	topic, exists := i.topics[topicName]
+	i.mu.RUnlock()
+	if !exists {
+		return "", fmt.Errorf("topic %s not found", topicName)
+	}
+
+	shard := topic.Shards[shardID]
+
+	// DEBUG: Dump the index state
+	count := 0
+	shard.OffsetIndex.Range(func(k, v any) bool {
+		count++
+		return true
+	})
 
 	// Read — lookup:
 	val, exists := shard.OffsetIndex.Load(seqNum)
@@ -207,11 +298,11 @@ func (i *Ingestor) Read(shardID int, seqNum uint64) (string, error) {
 	return string(payload), nil
 }
 
-func (i *Ingestor) getShard(key string) int {
+func (i *Ingestor) getShard(key string, shardNum int) int {
 	// 1. Handle the case where no key is provided (Round Robin or Random)
 	if key == "" {
 		// You could use an atomic counter here to cycle through NumOfShard
-		return int(i.counter.Add(1) % uint64(i.NumOfShard))
+		return int(i.counter.Add(1) % uint64(shardNum))
 	}
 
 	// 2. Hash the key into a 32-bit integer
@@ -220,7 +311,7 @@ func (i *Ingestor) getShard(key string) int {
 
 	// 3. Use Modulo to map the hash to one of your shard slots
 	// Example: If hash is 12345 and NumOfShard is 4, result is 1
-	return int(hashSum % uint32(i.NumOfShard))
+	return int(hashSum % uint32(shardNum))
 }
 
 func (i *Ingestor) getFile(shard *Shard, path string) (*os.File, error) {
@@ -316,14 +407,17 @@ func (i *Ingestor) Close() {
 	if i.cancelRetention != nil {
 		i.cancelRetention()
 	}
-
-	for _, shard := range i.shards {
-		shard.mu.Lock()
-		for _, f := range shard.fdCache {
-			f.Close()
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for _, topic := range i.topics {
+		for _, shard := range topic.Shards {
+			shard.mu.Lock()
+			for _, f := range shard.fdCache {
+				f.Close()
+			}
+			shard.ActiveFile.Close()
+			shard.mu.Unlock()
 		}
-		shard.ActiveFile.Close()
-		shard.mu.Unlock()
 	}
 }
 
@@ -346,42 +440,46 @@ func (i *Ingestor) startRetention(ttl time.Duration) {
 
 func (i *Ingestor) runRetention(ttl time.Duration) {
 	cutoff := time.Now().Add(-ttl).Unix()
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	for _, topic := range i.topics {
+		for _, shard := range topic.Shards {
+			shard.mu.Lock()
 
-	for _, shard := range i.shards {
-		shard.mu.Lock()
+			files, _ := filepath.Glob(filepath.Join(shard.Path, "*.log"))
+			sort.Strings(files)
 
-		files, _ := filepath.Glob(filepath.Join(shard.Path, "*.log"))
-		sort.Strings(files)
-
-		for _, filename := range files {
-			// Never delete the active file
-			if filename == shard.ActiveFile.Name() {
-				continue
-			}
-
-			// Parse timestamp from filename
-			base := filepath.Base(filename)
-			var ts int64
-			fmt.Sscanf(base, "%d.log", &ts)
-
-			if ts < cutoff {
-				// Evict from fd cache
-				if f, ok := shard.fdCache[filename]; ok {
-					f.Close()
-					delete(shard.fdCache, filename)
+			for _, filename := range files {
+				// Never delete the active file
+				if filename == shard.ActiveFile.Name() {
+					continue
 				}
-				// 2. Evict index entries pointing to this file
-				shard.OffsetIndex.Range(func(key, value any) bool {
-					loc := value.(RecordLocation)
-					if loc.Filename == filename {
-						shard.OffsetIndex.Delete(key)
+
+				// Parse timestamp from filename
+				base := filepath.Base(filename)
+				var ts int64
+				fmt.Sscanf(base, "%d.log", &ts)
+
+				if ts < cutoff {
+					// Evict from fd cache
+					if f, ok := shard.fdCache[filename]; ok {
+						f.Close()
+						delete(shard.fdCache, filename)
 					}
-					return true
-				})
-				os.Remove(filename)
-				i.logger.Info("compacted segment", "file", filename)
+					// 2. Evict index entries pointing to this file
+					shard.OffsetIndex.Range(func(key, value any) bool {
+						loc := value.(RecordLocation)
+						if loc.Filename == filename {
+							shard.OffsetIndex.Delete(key)
+						}
+						return true
+					})
+					os.Remove(filename)
+					i.logger.Info("compacted segment", "file", filename)
+				}
 			}
+			shard.mu.Unlock()
 		}
-		shard.mu.Unlock()
 	}
+
 }

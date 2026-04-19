@@ -23,8 +23,9 @@ const (
 
 type IngestRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
-	Payload       string                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
+	Topic         string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	Payload       string                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -59,6 +60,13 @@ func (*IngestRequest) Descriptor() ([]byte, []int) {
 	return file_pb_stream_proto_rawDescGZIP(), []int{0}
 }
 
+func (x *IngestRequest) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
 func (x *IngestRequest) GetKey() string {
 	if x != nil {
 		return x.Key
@@ -76,6 +84,7 @@ func (x *IngestRequest) GetPayload() string {
 type IngestResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SeqNum        uint64                 `protobuf:"varint,1,opt,name=seq_num,json=seqNum,proto3" json:"seq_num,omitempty"`
+	ShardId       int32                  `protobuf:"varint,2,opt,name=shard_id,json=shardId,proto3" json:"shard_id,omitempty"` // added — consumer needs this to know where to read
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -117,17 +126,121 @@ func (x *IngestResponse) GetSeqNum() uint64 {
 	return 0
 }
 
+func (x *IngestResponse) GetShardId() int32 {
+	if x != nil {
+		return x.ShardId
+	}
+	return 0
+}
+
+type CreateTopicRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Topic         string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	NumShards     int32                  `protobuf:"varint,2,opt,name=num_shards,json=numShards,proto3" json:"num_shards,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateTopicRequest) Reset() {
+	*x = CreateTopicRequest{}
+	mi := &file_pb_stream_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateTopicRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateTopicRequest) ProtoMessage() {}
+
+func (x *CreateTopicRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pb_stream_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateTopicRequest.ProtoReflect.Descriptor instead.
+func (*CreateTopicRequest) Descriptor() ([]byte, []int) {
+	return file_pb_stream_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *CreateTopicRequest) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *CreateTopicRequest) GetNumShards() int32 {
+	if x != nil {
+		return x.NumShards
+	}
+	return 0
+}
+
+type CreateTopicResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateTopicResponse) Reset() {
+	*x = CreateTopicResponse{}
+	mi := &file_pb_stream_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateTopicResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateTopicResponse) ProtoMessage() {}
+
+func (x *CreateTopicResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pb_stream_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateTopicResponse.ProtoReflect.Descriptor instead.
+func (*CreateTopicResponse) Descriptor() ([]byte, []int) {
+	return file_pb_stream_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *CreateTopicResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
 type ReadRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ShardId       int32                  `protobuf:"varint,1,opt,name=shard_id,json=shardId,proto3" json:"shard_id,omitempty"`
-	SeqNum        uint64                 `protobuf:"varint,2,opt,name=seq_num,json=seqNum,proto3" json:"seq_num,omitempty"`
+	Topic         string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	ShardId       int32                  `protobuf:"varint,2,opt,name=shard_id,json=shardId,proto3" json:"shard_id,omitempty"`
+	SeqNum        uint64                 `protobuf:"varint,3,opt,name=seq_num,json=seqNum,proto3" json:"seq_num,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReadRequest) Reset() {
 	*x = ReadRequest{}
-	mi := &file_pb_stream_proto_msgTypes[2]
+	mi := &file_pb_stream_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -139,7 +252,7 @@ func (x *ReadRequest) String() string {
 func (*ReadRequest) ProtoMessage() {}
 
 func (x *ReadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_pb_stream_proto_msgTypes[2]
+	mi := &file_pb_stream_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -152,7 +265,14 @@ func (x *ReadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadRequest.ProtoReflect.Descriptor instead.
 func (*ReadRequest) Descriptor() ([]byte, []int) {
-	return file_pb_stream_proto_rawDescGZIP(), []int{2}
+	return file_pb_stream_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ReadRequest) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
 }
 
 func (x *ReadRequest) GetShardId() int32 {
@@ -178,7 +298,7 @@ type ReadResponse struct {
 
 func (x *ReadResponse) Reset() {
 	*x = ReadResponse{}
-	mi := &file_pb_stream_proto_msgTypes[3]
+	mi := &file_pb_stream_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -190,7 +310,7 @@ func (x *ReadResponse) String() string {
 func (*ReadResponse) ProtoMessage() {}
 
 func (x *ReadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_pb_stream_proto_msgTypes[3]
+	mi := &file_pb_stream_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -203,7 +323,7 @@ func (x *ReadResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadResponse.ProtoReflect.Descriptor instead.
 func (*ReadResponse) Descriptor() ([]byte, []int) {
-	return file_pb_stream_proto_rawDescGZIP(), []int{3}
+	return file_pb_stream_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ReadResponse) GetPayload() string {
@@ -217,18 +337,28 @@ var File_pb_stream_proto protoreflect.FileDescriptor
 
 const file_pb_stream_proto_rawDesc = "" +
 	"\n" +
-	"\x0fpb/stream.proto\x12\vmini_stream\";\n" +
-	"\rIngestRequest\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\tR\apayload\")\n" +
+	"\x0fpb/stream.proto\x12\vmini_stream\"Q\n" +
+	"\rIngestRequest\x12\x14\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\x12\x18\n" +
+	"\apayload\x18\x03 \x01(\tR\apayload\"D\n" +
 	"\x0eIngestResponse\x12\x17\n" +
-	"\aseq_num\x18\x01 \x01(\x04R\x06seqNum\"A\n" +
-	"\vReadRequest\x12\x19\n" +
-	"\bshard_id\x18\x01 \x01(\x05R\ashardId\x12\x17\n" +
-	"\aseq_num\x18\x02 \x01(\x04R\x06seqNum\"(\n" +
+	"\aseq_num\x18\x01 \x01(\x04R\x06seqNum\x12\x19\n" +
+	"\bshard_id\x18\x02 \x01(\x05R\ashardId\"I\n" +
+	"\x12CreateTopicRequest\x12\x14\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x1d\n" +
+	"\n" +
+	"num_shards\x18\x02 \x01(\x05R\tnumShards\"/\n" +
+	"\x13CreateTopicResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\"W\n" +
+	"\vReadRequest\x12\x14\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x19\n" +
+	"\bshard_id\x18\x02 \x01(\x05R\ashardId\x12\x17\n" +
+	"\aseq_num\x18\x03 \x01(\x04R\x06seqNum\"(\n" +
 	"\fReadResponse\x12\x18\n" +
-	"\apayload\x18\x01 \x01(\tR\apayload2\x8f\x01\n" +
-	"\rStreamService\x12A\n" +
+	"\apayload\x18\x01 \x01(\tR\apayload2\xe1\x01\n" +
+	"\rStreamService\x12P\n" +
+	"\vCreateTopic\x12\x1f.mini_stream.CreateTopicRequest\x1a .mini_stream.CreateTopicResponse\x12A\n" +
 	"\x06Ingest\x12\x1a.mini_stream.IngestRequest\x1a\x1b.mini_stream.IngestResponse\x12;\n" +
 	"\x04Read\x12\x18.mini_stream.ReadRequest\x1a\x19.mini_stream.ReadResponseB\x06Z\x04./pbb\x06proto3"
 
@@ -244,20 +374,24 @@ func file_pb_stream_proto_rawDescGZIP() []byte {
 	return file_pb_stream_proto_rawDescData
 }
 
-var file_pb_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_pb_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_pb_stream_proto_goTypes = []any{
-	(*IngestRequest)(nil),  // 0: mini_stream.IngestRequest
-	(*IngestResponse)(nil), // 1: mini_stream.IngestResponse
-	(*ReadRequest)(nil),    // 2: mini_stream.ReadRequest
-	(*ReadResponse)(nil),   // 3: mini_stream.ReadResponse
+	(*IngestRequest)(nil),       // 0: mini_stream.IngestRequest
+	(*IngestResponse)(nil),      // 1: mini_stream.IngestResponse
+	(*CreateTopicRequest)(nil),  // 2: mini_stream.CreateTopicRequest
+	(*CreateTopicResponse)(nil), // 3: mini_stream.CreateTopicResponse
+	(*ReadRequest)(nil),         // 4: mini_stream.ReadRequest
+	(*ReadResponse)(nil),        // 5: mini_stream.ReadResponse
 }
 var file_pb_stream_proto_depIdxs = []int32{
-	0, // 0: mini_stream.StreamService.Ingest:input_type -> mini_stream.IngestRequest
-	2, // 1: mini_stream.StreamService.Read:input_type -> mini_stream.ReadRequest
-	1, // 2: mini_stream.StreamService.Ingest:output_type -> mini_stream.IngestResponse
-	3, // 3: mini_stream.StreamService.Read:output_type -> mini_stream.ReadResponse
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
+	2, // 0: mini_stream.StreamService.CreateTopic:input_type -> mini_stream.CreateTopicRequest
+	0, // 1: mini_stream.StreamService.Ingest:input_type -> mini_stream.IngestRequest
+	4, // 2: mini_stream.StreamService.Read:input_type -> mini_stream.ReadRequest
+	3, // 3: mini_stream.StreamService.CreateTopic:output_type -> mini_stream.CreateTopicResponse
+	1, // 4: mini_stream.StreamService.Ingest:output_type -> mini_stream.IngestResponse
+	5, // 5: mini_stream.StreamService.Read:output_type -> mini_stream.ReadResponse
+	3, // [3:6] is the sub-list for method output_type
+	0, // [0:3] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -274,7 +408,7 @@ func file_pb_stream_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pb_stream_proto_rawDesc), len(file_pb_stream_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

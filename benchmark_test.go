@@ -8,14 +8,19 @@ import (
 	"testing"
 )
 
+const benchTopic = "bench-topic"
+
 func setupIngestor(b *testing.B) (*Ingestor, func()) {
 	b.Helper()
 	dir, _ := os.MkdirTemp("", "bench-*")
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelError, // silence logs during bench
+		Level: slog.LevelError,
 	}))
-	ing, err := NewIngestor(4, dir, logger)
+	ing, err := NewIngestor(dir, logger)
 	if err != nil {
+		b.Fatal(err)
+	}
+	if err := ing.CreateTopic(benchTopic, 4); err != nil {
 		b.Fatal(err)
 	}
 	cleanup := func() {
@@ -36,7 +41,7 @@ func BenchmarkIngest_SmallPayload(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for n := 0; n < b.N; n++ {
-		if _, err := ing.Ingest("user-1", payload); err != nil {
+		if _, _, err := ing.Ingest(benchTopic, "user-1", payload); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -46,13 +51,12 @@ func BenchmarkIngest_LargePayload(b *testing.B) {
 	ing, cleanup := setupIngestor(b)
 	defer cleanup()
 
-	// 1KB payload
 	payload := fmt.Sprintf(`{"data":"%s"}`, string(make([]byte, 1000)))
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for n := 0; n < b.N; n++ {
-		if _, err := ing.Ingest("user-1", payload); err != nil {
+		if _, _, err := ing.Ingest(benchTopic, "user-1", payload); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -69,8 +73,8 @@ func BenchmarkIngest_Parallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			key := fmt.Sprintf("user-%d", i%100) // spread across shards
-			if _, err := ing.Ingest(key, payload); err != nil {
+			key := fmt.Sprintf("user-%d", i%100)
+			if _, _, err := ing.Ingest(benchTopic, key, payload); err != nil {
 				b.Fatal(err)
 			}
 			i++
@@ -87,18 +91,21 @@ func BenchmarkRead_Sequential(b *testing.B) {
 	payload := `{"event":"order_placed","user":"user-1"}`
 
 	// Pre-populate
+	var seqNum uint64
+	var shardID int
 	for n := 0; n < 10000; n++ {
-		ing.Ingest("user-1", payload)
+		seq, shard, _ := ing.Ingest(benchTopic, "user-1", payload)
+		seqNum = seq
+		shardID = shard
 	}
-
-	// user-1 hashes to a specific shard — find it
-	shardID := ing.getShard("user-1")
+	_ = seqNum
+	total := 10000
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for n := 0; n < b.N; n++ {
-		seq := uint64(n % 10000)
-		if _, err := ing.Read(shardID, seq); err != nil {
+		seq := uint64(n % total)
+		if _, err := ing.Read(benchTopic, shardID, seq); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -111,10 +118,15 @@ func BenchmarkRead_Parallel(b *testing.B) {
 	payload := `{"event":"order_placed","user":"user-1"}`
 	total := 10000
 
-	// Populate across multiple shards
+	// Track which shard each key lands on
+	shardForKey := make(map[string]int)
+	countForShard := make(map[int]int)
+
 	for n := 0; n < total; n++ {
 		key := fmt.Sprintf("user-%d", n%100)
-		ing.Ingest(key, payload)
+		_, shard, _ := ing.Ingest(benchTopic, key, payload)
+		shardForKey[key] = shard
+		countForShard[shard]++
 	}
 
 	b.ResetTimer()
@@ -123,8 +135,13 @@ func BenchmarkRead_Parallel(b *testing.B) {
 		n := 0
 		for pb.Next() {
 			key := fmt.Sprintf("user-%d", n%100)
-			shardID := ing.getShard(key) // make getShard public temporarily
-			ing.Read(shardID, uint64(n%(total/ing.NumOfShard)))
+			shard := shardForKey[key]
+			count := countForShard[shard]
+			if count == 0 {
+				n++
+				continue
+			}
+			ing.Read(benchTopic, shard, uint64(n%count))
 			n++
 		}
 	})
@@ -137,11 +154,12 @@ func BenchmarkProducerConsumer(b *testing.B) {
 	defer cleanup()
 
 	payload := `{"event":"order_placed","user":"user-1"}`
-	shardID := ing.getShard("user-1")
 
-	// Pre-populate so consumer has something to read
+	// Pre-populate and capture shard
+	var shardID int
 	for n := 0; n < b.N; n++ {
-		ing.Ingest("user-1", payload)
+		_, shard, _ := ing.Ingest(benchTopic, "user-1", payload)
+		shardID = shard
 	}
 
 	var wg sync.WaitGroup
@@ -153,7 +171,7 @@ func BenchmarkProducerConsumer(b *testing.B) {
 	go func() {
 		defer wg.Done()
 		for n := 0; n < b.N; n++ {
-			ing.Ingest("user-1", payload)
+			ing.Ingest(benchTopic, "user-1", payload)
 		}
 	}()
 
@@ -161,7 +179,7 @@ func BenchmarkProducerConsumer(b *testing.B) {
 	go func() {
 		defer wg.Done()
 		for n := 0; n < b.N; n++ {
-			ing.Read(shardID, uint64(n))
+			ing.Read(benchTopic, shardID, uint64(n))
 		}
 	}()
 
