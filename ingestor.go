@@ -140,7 +140,7 @@ func NewIngestor(dataDir string, logger *slog.Logger) (*Ingestor, error) {
 	i := &Ingestor{
 		DataDir:          dataDir,
 		logger:           logger,
-		MaxSegmentLength: 1024, // 1 kb for now
+		MaxSegmentLength: 128 * 1024 * 1024,
 		topics:           make(map[string]*Topic),
 	}
 

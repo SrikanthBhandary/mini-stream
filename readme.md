@@ -31,48 +31,24 @@ Producer (gRPC Client)
 Consumer (gRPC Client)
 ```
 
-## Features
-
-- **Sharded storage** — messages routed to shards via CRC32 key hashing for deterministic distribution.
-- **Append-only log segments** — immutable, size-bounded files with automatic rotation.
-- **Binary framing** — length-prefixed records with per-record CRC32 integrity checksums.
-- **Crash recovery** — full log replay on startup; truncates corrupt/partial records at the crash boundary.
-- **Concurrent read safety** — uses `ReadAt` (pread syscall) to enable lock-free reads without shared cursors.
-- **FD cache** — file descriptors pooled with double-checked locking to avoid `os.Open` overhead.
-- **gRPC transport** — Protobuf-defined service with separate producer/consumer CLIs.
-- **Graceful Shutdown** — uses `sync.WaitGroup` to gate file closures, ensuring zero data loss during process termination.
-
----
-
-## On-Disk Record Format
-
-Every record written to a segment file follows this binary layout:
-
-```text
-┌─────────────┬─────────────┬──────────────────┐
-│  Length     │   CRC32     │    Payload       │
-│  (4 bytes)  │  (4 bytes)  │   (N bytes)      │
-└─────────────┴─────────────┴──────────────────┘
-```
-
----
-
 ## Benchmarks
+Benchmarked on Apple M5 (ARM64), Go 1.26.
 
-Benchmarked on Apple M5 (ARM64), Go 1.26, 10 GOMAXPROCS.
-
-| Benchmark | ops/sec | ns/op | B/op | allocs/op |
-| :--- | :--- | :--- | :--- | :--- |
-| **Ingest (Small Payload)** | ~5,200 | 191,956 | 222 | 6 |
-| **Ingest (Large Payload)** | ~250 | 4,055,861 | 1,574 | 12 |
-| **Ingest (Parallel)** | ~5,200 | 190,992 | 223 | 7 |
-| **Read (Sequential)** | ~1,450,000 | 687 | 96 | 2 |
-| **Read (Parallel)** | ~700,000 | 1,458 | 104 | 3 |
-| **Producer + Consumer** | ~4,300 | 236,692 | 321 | 8 |
+| Benchmark | ns/op | B/op | allocs/op |
+| :--- | :--- | :--- | :--- |
+| **Ingest (Small)** | 2,305 | 196 | 6 |
+| **Ingest (Large)** | 2,946 | 1,173 | 6 |
+| **Ingest (Parallel)** | 2,487 | 214 | 7 |
+| **Read (Sequential)** | 675 | 96 | 2 |
+| **Read (Parallel)** | 1,404 | 104 | 3 |
+| **Producer + Consumer** | 5,925 | 286 | 8 |
+| **Ingest (128MB Segments)** | 2,267 | 196 | 6 |
+| **Ingest (1KB Segments)** | 193,609 | 222 | 6 |
 
 ### Performance Analysis
-* **Durability:** Ingest throughput numbers reflect a "safe" configuration where every write is durability-guaranteed via `ActiveFile.Sync()`. The bottleneck is disk I/O synchronization, ensuring no data is lost during a crash.
-* **Read Scalability:** Sequential reads are near-memory speed. The parallel read performance demonstrates that our `sync.Map` approach effectively eliminates lock contention.
+* **The "Rotation Tax":** Our benchmarks demonstrate an ~85x performance penalty when using tiny (1KB) segments vs. large (128MB) segments. This highlights the overhead of file system metadata updates, descriptor allocation, and disk synchronization.
+* **Read Scalability:** Sequential read performance (~675ns/op) showcases the efficiency of our log-structured design, which benefits from sequential disk I/O and OS page caching.
+* **Concurrency:** The parallel read performance (~1,404ns/op) validates that our lock-free `ReadAt` approach successfully minimizes contention across multiple consumer threads.
 
 ---
 
@@ -101,15 +77,15 @@ go run cmd/producer/main.go
 
 | Decision | Rationale |
 | :--- | :--- |
-| **Append-only segments** | Writes are sequential, maximizing disk throughput and enabling simple crash recovery. |
-| **CRC32 per record** | Detects partial writes at the crash boundary without heavy global locking. |
-| **In-memory index** | Enables O(1) random reads by sequence number; rebuilt from log on restart. |
-| **`ReadAt`** | Passes offset directly to `pread(2)` — no shared file cursor, safe for concurrent reads. |
-| **Graceful Shutdown** | `sync.WaitGroup` prevents file handles from closing while disk writes are in-flight. |
-| **FD Cache** | Amortizes `open(2)` syscall cost across many reads to sealed segments. |
+| **Append-only segments** | Maximizes sequential disk throughput; enables O(1) recovery via simple log replay. |
+| **CRC32 per record** | Ensures data integrity; allows detection of partial writes during recovery without global locking. |
+| **`ReadAt` (pread)** | Enables concurrent reads without shared file pointers, avoiding mutex bottlenecks on reads. |
+| **FD Cache** | Amortizes the cost of `open(2)` syscalls across multiple read operations. |
+| **Graceful Shutdown** | Uses `sync.WaitGroup` to flush in-flight buffers, ensuring zero data loss on termination. |
 
 ---
 
 ## License
 
 MIT
+

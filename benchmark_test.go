@@ -185,3 +185,41 @@ func BenchmarkProducerConsumer(b *testing.B) {
 
 	wg.Wait()
 }
+
+func BenchmarkIngest_HighPerformance(b *testing.B) {
+	// 1. Setup
+	ingestor, cleanup := setupIngestor(b)
+	defer cleanup()
+
+	// 2. Set to 128MB for "Production" performance
+	ingestor.SetFileSizeLimit(128 * 1024 * 1024)
+
+	payload := `{"event":"order_placed","user":"user-1"}`
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Fix: Use benchTopic and check for errors!
+		if _, _, err := ingestor.Ingest(benchTopic, "user-1", payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkIngest_FrequentRotation(b *testing.B) {
+	// 1. Setup
+	ingestor, cleanup := setupIngestor(b)
+	defer cleanup()
+
+	// 2. Set to 1KB to stress-test your rotation logic
+	ingestor.SetFileSizeLimit(1024)
+
+	payload := `{"event":"order_placed","user":"user-1"}`
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Fix: Use benchTopic and check for errors!
+		if _, _, err := ingestor.Ingest(benchTopic, "user-1", payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
